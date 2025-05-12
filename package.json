@@ -1,0 +1,39 @@
+{
+    "name": "scansnap-receipt-organizer",
+    "version": "1.0.0",
+    "description": "An application that integrates with ScanSnap Manager to organize scanned receipts into client folders",
+    "main": "main.js",
+    "scripts": {
+        "start": "cross-env NODE_ENV=development electron .",
+        "build": "electron-builder",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "chokidar": "^3.5.3",
+        "electron-store": "^8.1.0"
+    },
+    "devDependencies": {
+        "cross-env": "^7.0.3",
+        "electron": "^29.0.0",
+        "electron-builder": "^24.9.0"
+    },
+    "build": {
+        "appId": "com.scansnap.receipt.organizer",
+        "productName": "ScanSnap Receipt Organizer",
+        "icon": "assets/icon.png",
+        "asarUnpack": [
+            "**/assets/**"
+        ],
+        "mac": {
+            "category": "public.app-category.productivity"
+        },
+        "win": {
+            "target": "nsis"
+        },
+        "linux": {
+            "target": "AppImage"
+        }
+    }
+}

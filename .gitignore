@@ -1,0 +1,36 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+/out
+
+# Electron-Builder cache / temp files
+/release
+*.nsis.msi
+*.nsis.zip
+*.exe.blockmap
+*.dmg.blockmap
+*.AppImage.blockmap
+*.*.yaml
+
+# Settings file (contains user-specific paths)
+.scansnap-organizer-settings.json
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor specific
+.idea
+.vscode
+*.suo
+*.user
+*.log
+
+# NPM debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+yarn.lock
+package-lock.json 
