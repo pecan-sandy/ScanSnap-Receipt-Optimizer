@@ -167,12 +167,14 @@ closeManageVendorsModalBtn.addEventListener('click', () => {
 
 // Handle client folder selection
 clientFolderSelect.addEventListener('change', () => {
-    if (clientFolderSelect.value) { 
-        clientNameInput.value = clientFolderSelect.options[clientFolderSelect.selectedIndex].text; 
-    } else {
-        clientNameInput.value = ''; 
-    }
-    updatePreview();
+    // if (clientFolderSelect.value) { 
+    //     clientNameInput.value = clientFolderSelect.options[clientFolderSelect.selectedIndex].text; 
+    // } else {
+    //     clientNameInput.value = ''; 
+    // }
+    // The user will now manually enter the Client Company Name for the filename.
+    // The dropdown selection only determines the save path.
+    updatePreview(); // Still update preview as the folder path changes
 });
 
 // Handle "Add Existing Client Folder" button
@@ -210,6 +212,8 @@ vendorNameInput.addEventListener('input', () => {
     const inputText = vendorNameInput.value;
     const lowerInputText = inputText.toLowerCase(); 
     
+    console.log('[VendorInput] Autocomplete typing. Current sessionKnownVendors:', Array.from(sessionKnownVendors)); // DIAGNOSTIC LOG
+
     vendorNameGhostInput.value = ''; 
 
     if (inputText.length === 0) { 
@@ -417,31 +421,38 @@ saveBtn.addEventListener('click', () => {
 
     // Disable button to prevent multiple submissions
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Saving...'; // Optional: provide visual feedback
-    // If you have an icon: saveBtn.querySelector('svg').style.display = 'none'; // Hide icon
-    // Add a spinner or different text to indicate processing
+    saveBtn.textContent = 'Saving...'; 
+
+    const vendorToSave = vendorNameInput.value.trim(); // Get vendor name BEFORE sending
 
     window.electron.send('save-receipt', {
         clientFolder: clientFolderSelect.value,
         clientName: clientNameInput.value,
-        vendorName: vendorNameInput.value,
+        vendorName: vendorToSave, // Use the captured vendor name
         date: formatDate(dateInput.value),
         amount: amountInput.value,
-        originalFilePath: currentScanPath
+        originalFilePath: currentScanPath,
+        // alsoSendVendorForKnowing: vendorToSave // Send it explicitly for main process
     });
 });
 
 window.electron.receive('save-receipt-result', (result) => { 
     // Re-enable button regardless of success or failure
     saveBtn.disabled = false;
-    // Restore button text/icon
     saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-save"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>Save Receipt';
 
     if (result.success) {
         showStatus(`Receipt saved successfully to ${result.path}`, true);
-        const vendor = vendorNameInput.value.trim(); // This vendor might be empty due to optimistic clear
-        // So, we should probably get it *before* optimistic clear if we need the *just saved* vendor
-        // For adding to knownVendors, it's fine as it's sent to main before clearing here.
+        // const vendor = vendorNameInput.value.trim(); // OLD: Might be empty due to optimistic clear
+        // Main process will handle adding vendor from the 'save-receipt' payload if successful
+        // Optimistic add to local set for UI is still good if the vendor was successfully sent.
+        // We need the vendor name that was actually part of the successful save.
+        // It was sent via result.vendorNameUsedInSave from main.js now.
+
+        if (result.vendorNameUsedInSave) { // Check if main process sent it back
+            sessionKnownVendors.add(result.vendorNameUsedInSave);
+            console.log('Optimistically added to sessionKnownVendors (from main process confirmation):', result.vendorNameUsedInSave, 'Current set:', Array.from(sessionKnownVendors));
+        }
 
         // The actual clearing of vendor/amount for the *next* receipt happens after a delay
         // OR if a new scan comes in, or by the optimistic clear.

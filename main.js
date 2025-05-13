@@ -76,6 +76,7 @@ function loadSettings() {
             if (settings.knownVendors && Array.isArray(settings.knownVendors)) {
                 knownVendorsSet = new Set(settings.knownVendors.slice(0, CONFIG.maxKnownVendors));
             }
+            console.log('[loadSettings] Loaded knownVendorsSet:', Array.from(knownVendorsSet));
         }
     } catch (error) {
         console.error('Error loading settings:', error);
@@ -166,16 +167,21 @@ function initialize() {
 // Process a newly detected scan
 function processNewScan(filePath) {
     if (CONFIG.autoPromptEnabled) {
-        // Auto-prompt is enabled
         if (appMainWindow && !appMainWindow.isDestroyed()) {
-            // If window is already open, just send the file to it
             console.log('Auto-prompt: Window open, sending file.');
-            appMainWindow.focus(); // Bring to front
+            if (!appMainWindow.isVisible()) {
+                appMainWindow.show(); // Ensure window is visible if it was hidden
+            }
+            if (appMainWindow.isMinimized()) {
+                appMainWindow.restore(); // Restore if minimized
+            }
+            appMainWindow.setAlwaysOnTop(true); // Bring to very front
+            appMainWindow.focus(); 
+            appMainWindow.setAlwaysOnTop(false); // Revert always on top status
             appMainWindow.webContents.send('scan-file', filePath);
         } else {
-            // If no window, or it was closed, create a new one with the file
             console.log('Auto-prompt: Window not open, creating new one.');
-            createWindow(filePath);
+            createWindow(filePath); // createWindow will also handle bringing to front
         }
     } else {
         // Auto-prompt is disabled, create a notification instead
@@ -216,14 +222,21 @@ function createNotification(filePath) {
 
 // Create the main application window
 function createWindow(filePath) {
-    // If a window already exists, focus it and send the file path
     if (appMainWindow && !appMainWindow.isDestroyed()) {
         console.log('Main window already open. Focusing and sending file.');
+        if (!appMainWindow.isVisible()) {
+            appMainWindow.show();
+        }
+        if (appMainWindow.isMinimized()) {
+            appMainWindow.restore();
+        }
+        appMainWindow.setAlwaysOnTop(true);
         appMainWindow.focus();
-        if (filePath) { // Only send if a filePath is provided
+        appMainWindow.setAlwaysOnTop(false);
+        if (filePath) { 
             appMainWindow.webContents.send('scan-file', filePath);
         }
-        return; // Don't create a new window
+        return; 
     }
 
     console.log('Creating new main window.');
@@ -256,6 +269,14 @@ function createWindow(filePath) {
     // Assign to global reference
     appMainWindow = newWindow;
 
+    // After window is created and ready to be shown for the first time (especially if loading a file)
+    newWindow.once('ready-to-show', () => {
+        newWindow.setAlwaysOnTop(true);
+        newWindow.show(); // Or newWindow.focus(); if show() is not needed here
+        newWindow.focus(); // Ensure focus after showing
+        newWindow.setAlwaysOnTop(false);
+    });
+
     // Once the window is ready, send the file path (if provided for a new window)
     if (filePath) {
         appMainWindow.webContents.on('did-finish-load', () => {
@@ -283,26 +304,30 @@ function createWindow(filePath) {
 
     // IPC handler to get the list of known vendors
     ipcMain.on('get-known-vendors', (event) => {
+        console.log('[ipcMain] get-known-vendors sending:', Array.from(knownVendorsSet));
         event.reply('known-vendors-list', Array.from(knownVendorsSet));
     });
 
-    // IPC handler to add a new known vendor
+    // IPC handler to add a new known vendor (This is now mostly a fallback or for direct adds if ever needed elsewhere)
     ipcMain.on('add-known-vendor', (event, vendorName) => {
+        console.log('[ipcMain] add-known-vendor explicitly called with:', vendorName);
         if (vendorName && typeof vendorName === 'string') {
             const trimmedVendor = vendorName.trim();
             if (trimmedVendor) {
-                // Add to set (handles uniqueness)
+                const previousSize = knownVendorsSet.size;
                 knownVendorsSet.add(trimmedVendor);
-                
-                // Optional: Enforce maxKnownVendors by removing oldest if set is too large
-                // This is a simple FIFO, could be more sophisticated (e.g. LRU)
                 while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
                     const oldestVendor = knownVendorsSet.values().next().value;
                     knownVendorsSet.delete(oldestVendor);
                 }
-                saveSettings(); // Save after modification
-                // Optionally, send the updated list back, though renderer might handle optimistically
-                // event.reply('known-vendors-list', Array.from(knownVendorsSet)); 
+                if (knownVendorsSet.size > previousSize) { 
+                     console.log('[ipcMain] Vendor added/updated via explicit call. New set:', Array.from(knownVendorsSet));
+                     saveSettings(); 
+                     // Optionally send updated list back if this channel expects a reply
+                     event.reply('known-vendors-list', Array.from(knownVendorsSet));
+                } else {
+                    console.log('[ipcMain] Explicit add: Vendor already existed or was empty after trim.');
+                }
             }
         }
     });
@@ -342,22 +367,36 @@ function createWindow(filePath) {
     // Handle receipt saving
     ipcMain.on('save-receipt', (event, data) => {
         const { clientFolder, clientName, vendorName, date, amount, originalFilePath } = data;
+        console.log('[ipcMain] save-receipt: Received vendorName for potential save:', vendorName);
 
-        // Format the filename
+        // Format the filename (vendorName here is the one intended for the filename)
         const formattedDate = date.replace(/\//g, '-');
         const newFileName = `${clientName} ${vendorName} ${formattedDate} ${amount}${path.extname(originalFilePath)}`;
 
-        // Determine the destination path
         const destinationPath = path.join(clientFolder, newFileName);
 
         try {
-            // Copy the file to the destination
             fs.copyFileSync(originalFilePath, destinationPath);
 
-            // Optionally, remove the original file
-            // fs.unlinkSync(originalFilePath);
-
-            event.reply('save-receipt-result', { success: true, path: destinationPath });
+            // If save is successful, add vendorName to knownVendorsSet
+            if (vendorName && typeof vendorName === 'string') {
+                const trimmedVendorForSet = vendorName.trim();
+                if (trimmedVendorForSet) {
+                    const previousSize = knownVendorsSet.size;
+                    knownVendorsSet.add(trimmedVendorForSet);
+                    while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
+                        const oldestVendor = knownVendorsSet.values().next().value;
+                        knownVendorsSet.delete(oldestVendor);
+                    }
+                    if (knownVendorsSet.size > previousSize) {
+                        console.log('[ipcMain] save-receipt: New vendor added to set:', trimmedVendorForSet, 'New set:', Array.from(knownVendorsSet));
+                        saveSettings(); // Save settings because knownVendorsSet changed
+                    } else {
+                        console.log('[ipcMain] save-receipt: Vendor already in set or empty:', trimmedVendorForSet);
+                    }
+                }
+            }
+            event.reply('save-receipt-result', { success: true, path: destinationPath, vendorNameUsedInSave: vendorName }); // Send back the vendorName
         } catch (error) {
             console.error('Error saving receipt:', error);
             event.reply('save-receipt-result', { success: false, error: error.message });
