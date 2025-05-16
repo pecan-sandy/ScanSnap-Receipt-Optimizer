@@ -99,7 +99,7 @@ function saveSettings() {
 
 // Start watching the scan folder for new files
 function startFileWatcher() {
-    if (watcher) { // If watcher already exists, it might be an error or need explicit closing first
+    if (watcher) { 
         console.log('Watcher already active or not properly closed first. Attempting to close and restart.');
         watcher.close(); 
         watcher = null;
@@ -107,17 +107,36 @@ function startFileWatcher() {
     console.log('Starting file watcher for:', CONFIG.scanWatchFolder);
     try {
         watcher = chokidar.watch(CONFIG.scanWatchFolder, {
-            ignored: /(^|[\/\\])\../, // Ignore hidden files
+            ignored: [
+                /(^|[\/\\])\../,  // Ignore hidden files/folders
+                /\.\$sshold\$/,    // Ignore files/folders containing .$sshold$
+                (pathString, stats) => { // Additional function to specifically target PDFs
+                    if (stats && stats.isFile() && !path.extname(pathString).toLowerCase().endsWith('.pdf')) {
+                        // console.log('Ignoring non-PDF file based on extension:', pathString);
+                        return true; // Ignore if it's a file but not a PDF
+                    }
+                    return false; // Don't ignore by default from this function
+                }
+            ],
             persistent: true,
-            ignoreInitial: true // Don't fire 'add' for existing files on startup
+            ignoreInitial: true,
+            // Consider awaitWriteFinish if issues persist with partially written files
+            // awaitWriteFinish: {
+            //     stabilityThreshold: 2000,
+            //     pollInterval: 100
+            // }
         });
 
         watcher.on('add', filePath => {
-            console.log(`New scan detected by watcher: ${filePath}`);
-            // Wait a moment to ensure the file is completely written
+            // Defensive check: Ensure we only process PDFs and not missed .$sshold$ files
+            if (filePath.includes('.$sshold$') || !filePath.toLowerCase().endsWith('.pdf')) {
+                console.log(`[Watcher Event] Ignoring temporary or non-PDF file: ${filePath}`);
+                return;
+            }
+            console.log(`[Watcher Event] New PDF detected, processing: ${filePath}`);
             setTimeout(() => {
                 processNewScan(filePath);
-            }, 1000);
+            }, 1000); // Existing delay, might still be useful
         });
 
         watcher.on('error', error => {
