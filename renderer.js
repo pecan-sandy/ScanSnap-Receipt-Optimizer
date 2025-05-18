@@ -37,6 +37,7 @@ dateInput.value = today.toISOString().split('T')[0];
 
 // Store the path of the current scan
 let currentScanPath = '';
+let lastUsedDate = ''; // Variable to store the last successfully used date in the current session
 
 // Initialize client folders & known vendors & statuses
 window.electron.send('get-client-folders');
@@ -437,45 +438,38 @@ saveBtn.addEventListener('click', () => {
 });
 
 window.electron.receive('save-receipt-result', (result) => { 
-    // Re-enable button regardless of success or failure
     saveBtn.disabled = false;
     saveBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-save"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>Save Receipt';
 
     if (result.success) {
         showStatus(`Receipt saved successfully to ${result.path}`, true);
-        // const vendor = vendorNameInput.value.trim(); // OLD: Might be empty due to optimistic clear
-        // Main process will handle adding vendor from the 'save-receipt' payload if successful
-        // Optimistic add to local set for UI is still good if the vendor was successfully sent.
-        // We need the vendor name that was actually part of the successful save.
-        // It was sent via result.vendorNameUsedInSave from main.js now.
+        
+        lastUsedDate = dateInput.value; // Store the successfully saved date
 
-        if (result.vendorNameUsedInSave) { // Check if main process sent it back
+        if (result.vendorNameUsedInSave) { 
             sessionKnownVendors.add(result.vendorNameUsedInSave);
             console.log('Optimistically added to sessionKnownVendors (from main process confirmation):', result.vendorNameUsedInSave, 'Current set:', Array.from(sessionKnownVendors));
         }
 
-        // The actual clearing of vendor/amount for the *next* receipt happens after a delay
-        // OR if a new scan comes in, or by the optimistic clear.
-        // The optimistic clear from Enter key handles the immediate visual feedback.
-        // The setTimeout here ensures fields are cleared if save was from a button click.
         setTimeout(() => {
-            // Only clear if not already cleared by optimistic clear (e.g. if user clicked save button)
-            // However, optimistic clear already did this for Enter key.
-            // To avoid confusion, let's make the timeout clear only if values are still present.
             if (vendorNameInput.value !== '' || amountInput.value !== '') {
                  vendorNameInput.value = '';
                  amountInput.value = '';
             }
-            // If focus was not already set to vendorNameInput (e.g. by Enter key press), set it now.
+            // Set date to last used date for the next entry in the same session
+            if (lastUsedDate) {
+                dateInput.value = lastUsedDate;
+            } else {
+                // Fallback to today if lastUsedDate is somehow not set (should not happen after a save)
+                dateInput.value = new Date().toISOString().split('T')[0];
+            }
+
             if (document.activeElement !== vendorNameInput) {
                 vendorNameInput.focus();
             }
-        }, 2000); // This delay is quite long, consider reducing or removing if optimistic clear is sufficient
+        }, 500); // Reduced delay for quicker form reset, adjust as needed
     } else {
         showStatus(`Error saving receipt: ${result.error}`, false);
-        // If save failed, and fields were optimistically cleared, user might want to re-enter.
-        // However, for simplicity, we won't try to restore them here.
-        // Focus might still go to vendor name due to optimistic logic.
     }
 });
 
@@ -486,8 +480,12 @@ window.electron.receive('scan-file', (filePath) => {
     
     vendorNameInput.value = '';
     amountInput.value = '';
-    const today = new Date();
-    dateInput.value = today.toISOString().split('T')[0];
+    // When a new scan loads, use the lastUsedDate if available for this session, else default to today
+    if (lastUsedDate) {
+        dateInput.value = lastUsedDate;
+    } else {
+        dateInput.value = new Date().toISOString().split('T')[0];
+    }
     updatePreview();
 });
 
@@ -540,9 +538,17 @@ clearFormBtn.addEventListener('click', () => {
     clientNameInput.value = '';
     vendorNameInput.value = '';
     amountInput.value = '';
-    dateInput.value = today.toISOString().split('T')[0]; // Reset date to today
-    currentScanPath = ''; // Clear current scan path
-    vendorNameGhostInput.value = ''; // Clear ghost text
+    // dateInput.value = today.toISOString().split('T')[0]; // Reset date to today
+    // On clear form, decide: revert to today, or keep lastUsedDate?
+    // Let's keep lastUsedDate for consistency if user is batch processing.
+    // If they want truly fresh, they can restart or manually change date.
+    if (lastUsedDate) {
+        dateInput.value = lastUsedDate;
+    } else {
+        dateInput.value = new Date().toISOString().split('T')[0];
+    }
+    currentScanPath = ''; 
+    vendorNameGhostInput.value = ''; 
     clearAndHideSuggestions(); // Clear vendor suggestions
     updatePreview();
     // clientFolderSelect.selectedIndex = 0; // Optionally reset client folder selection
