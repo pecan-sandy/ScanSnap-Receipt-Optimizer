@@ -176,11 +176,201 @@ function initialize() {
         } else {
             console.log('Scan monitoring is disabled by settings.');
         }
+        
+        // Register all IPC handlers once at startup
+        registerIpcHandlers();
     } catch (e) {
         console.error('Initialization Error:', e);
         dialog.showErrorBox('Application Initialization Error', e.stack || e.toString());
         app.quit(); // Exit if critical initialization fails
     }
+}
+
+// Register all IPC handlers - called once at app startup
+function registerIpcHandlers() {
+    // IPC handler to get the list of known vendors
+    ipcMain.on('get-known-vendors', (event) => {
+        console.log('[ipcMain] get-known-vendors sending:', Array.from(knownVendorsSet));
+        event.reply('known-vendors-list', Array.from(knownVendorsSet));
+    });
+
+    // IPC handler to add a new known vendor
+    ipcMain.on('add-known-vendor', (event, vendorName) => {
+        console.log('[ipcMain] add-known-vendor explicitly called with:', vendorName);
+        if (vendorName && typeof vendorName === 'string') {
+            const trimmedVendor = vendorName.trim();
+            if (trimmedVendor) {
+                const previousSize = knownVendorsSet.size;
+                knownVendorsSet.add(trimmedVendor);
+                while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
+                    const oldestVendor = knownVendorsSet.values().next().value;
+                    knownVendorsSet.delete(oldestVendor);
+                }
+                if (knownVendorsSet.size > previousSize) { 
+                     console.log('[ipcMain] Vendor added/updated via explicit call. New set:', Array.from(knownVendorsSet));
+                     saveSettings(); 
+                     event.reply('known-vendors-list', Array.from(knownVendorsSet));
+                } else {
+                    console.log('[ipcMain] Explicit add: Vendor already existed or was empty after trim.');
+                }
+            }
+        }
+    });
+
+    // Handle client folder management
+    ipcMain.on('get-client-folders', (event) => {
+        event.sender.send('client-folders', clientFolders);
+    });
+
+    // Handle request to open directory dialog
+    ipcMain.on('show-open-directory-dialog', async (event) => {
+        const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow(), {
+            properties: ['openDirectory']
+        });
+
+        if (!result.canceled && result.filePaths.length > 0) {
+            const selectedPath = result.filePaths[0];
+            const folderName = path.basename(selectedPath);
+
+            // Check if this folder (by path) already exists
+            const existingFolder = clientFolders.find(folder => folder.path === selectedPath);
+            if (!existingFolder) {
+                clientFolders.push({ name: folderName, path: selectedPath });
+                saveSettings();
+                BrowserWindow.getAllWindows().forEach(win => {
+                    win.webContents.send('client-folders', clientFolders);
+                });
+            } else {
+                console.log('Folder already added:', selectedPath);
+            }
+        }
+    });
+
+    // Handle receipt saving
+    ipcMain.on('save-receipt', (event, data) => {
+        const { clientFolder, clientName, vendorName, date, amount, originalFilePath } = data;
+        console.log('[ipcMain] save-receipt: Received vendorName for potential save:', vendorName);
+
+        const formattedDate = date.replace(/\//g, '-');
+        const newFileName = `${clientName} ${vendorName} ${formattedDate} ${amount}${path.extname(originalFilePath)}`;
+
+        const destinationPath = path.join(clientFolder, newFileName);
+
+        try {
+            fs.copyFileSync(originalFilePath, destinationPath);
+
+            if (vendorName && typeof vendorName === 'string') {
+                const trimmedVendorForSet = vendorName.trim();
+                if (trimmedVendorForSet) {
+                    const previousSize = knownVendorsSet.size;
+                    knownVendorsSet.add(trimmedVendorForSet);
+                    while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
+                        const oldestVendor = knownVendorsSet.values().next().value;
+                        knownVendorsSet.delete(oldestVendor);
+                    }
+                    if (knownVendorsSet.size > previousSize) {
+                        console.log('[ipcMain] save-receipt: New vendor added to set:', trimmedVendorForSet, 'New set:', Array.from(knownVendorsSet));
+                        saveSettings();
+                    } else {
+                        console.log('[ipcMain] save-receipt: Vendor already in set or empty:', trimmedVendorForSet);
+                    }
+                }
+            }
+            event.reply('save-receipt-result', { success: true, path: destinationPath, vendorNameUsedInSave: vendorName });
+        } catch (error) {
+            console.error('Error saving receipt:', error);
+            event.reply('save-receipt-result', { success: false, error: error.message });
+        }
+    });
+
+    // Handle toggle auto-prompt setting
+    ipcMain.on('toggle-auto-prompt', (event, enabled) => {
+        CONFIG.autoPromptEnabled = enabled;
+        saveSettings();
+        
+        BrowserWindow.getAllWindows().forEach(win => {
+            if (win && !win.isDestroyed() && win.webContents) {
+                win.webContents.send('auto-prompt-status', CONFIG.autoPromptEnabled);
+            }
+        });
+        if (tray) {
+            createTrayMenu();
+        }
+    });
+
+    // Handle get auto-prompt status
+    ipcMain.on('get-auto-prompt-status', (event) => {
+        event.reply('auto-prompt-status', CONFIG.autoPromptEnabled);
+    });
+
+    // Handle toggle scan monitoring setting from UI
+    ipcMain.on('toggle-scan-monitoring', (event, enabled) => {
+        CONFIG.monitoringEnabled = enabled;
+        saveSettings();
+
+        if (CONFIG.monitoringEnabled) {
+            startFileWatcher();
+        } else {
+            stopFileWatcher();
+        }
+
+        BrowserWindow.getAllWindows().forEach(win => {
+            if (win && !win.isDestroyed() && win.webContents) {
+                win.webContents.send('monitoring-status-changed', CONFIG.monitoringEnabled);
+            }
+        });
+
+        if (tray) {
+            createTrayMenu();
+        }
+    });
+
+    // Handle get monitoring status from UI
+    ipcMain.on('get-monitoring-status', (event) => {
+        event.sender.send('monitoring-status-changed', CONFIG.monitoringEnabled);
+    });
+
+    // IPC Handler to remove a client folder
+    ipcMain.on('remove-client-folder', (event, folderPathToRemove) => {
+        if (folderPathToRemove && typeof folderPathToRemove === 'string') {
+            const initialLength = clientFolders.length;
+            clientFolders = clientFolders.filter(folder => folder.path !== folderPathToRemove);
+
+            if (clientFolders.length < initialLength) {
+                saveSettings();
+                BrowserWindow.getAllWindows().forEach(win => {
+                    if (win && !win.isDestroyed() && win.webContents) {
+                        win.webContents.send('client-folders', clientFolders);
+                    }
+                });
+                console.log('Removed client folder:', folderPathToRemove, 'New list:', clientFolders);
+            } else {
+                console.log('Client folder not found for removal:', folderPathToRemove);
+            }
+        } else {
+            console.error('Invalid folderPathToRemove received:', folderPathToRemove);
+        }
+    });
+
+    // IPC Handler to remove a known vendor
+    ipcMain.on('remove-known-vendor', (event, vendorNameToRemove) => {
+        if (vendorNameToRemove && typeof vendorNameToRemove === 'string') {
+            if (knownVendorsSet.has(vendorNameToRemove)) {
+                knownVendorsSet.delete(vendorNameToRemove);
+                saveSettings();
+                BrowserWindow.getAllWindows().forEach(win => {
+                    if (win && !win.isDestroyed() && win.webContents) {
+                        win.webContents.send('known-vendors-list', Array.from(knownVendorsSet));
+                    }
+                });
+                console.log('Removed known vendor:', vendorNameToRemove, 'New set:', knownVendorsSet);
+            } else {
+                console.log('Known vendor not found for removal:', vendorNameToRemove);
+            }
+        } else {
+            console.error('Invalid vendorNameToRemove received:', vendorNameToRemove);
+        }
+    });
 }
 
 // Process a newly detected scan
@@ -319,203 +509,6 @@ function createWindow(filePath) {
     appMainWindow.on('closed', () => {
         console.log('Main window closed.');
         appMainWindow = null; // Dereference the window object
-    });
-
-    // IPC handler to get the list of known vendors
-    ipcMain.on('get-known-vendors', (event) => {
-        console.log('[ipcMain] get-known-vendors sending:', Array.from(knownVendorsSet));
-        event.reply('known-vendors-list', Array.from(knownVendorsSet));
-    });
-
-    // IPC handler to add a new known vendor (This is now mostly a fallback or for direct adds if ever needed elsewhere)
-    ipcMain.on('add-known-vendor', (event, vendorName) => {
-        console.log('[ipcMain] add-known-vendor explicitly called with:', vendorName);
-        if (vendorName && typeof vendorName === 'string') {
-            const trimmedVendor = vendorName.trim();
-            if (trimmedVendor) {
-                const previousSize = knownVendorsSet.size;
-                knownVendorsSet.add(trimmedVendor);
-                while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
-                    const oldestVendor = knownVendorsSet.values().next().value;
-                    knownVendorsSet.delete(oldestVendor);
-                }
-                if (knownVendorsSet.size > previousSize) { 
-                     console.log('[ipcMain] Vendor added/updated via explicit call. New set:', Array.from(knownVendorsSet));
-                     saveSettings(); 
-                     // Optionally send updated list back if this channel expects a reply
-                     event.reply('known-vendors-list', Array.from(knownVendorsSet));
-                } else {
-                    console.log('[ipcMain] Explicit add: Vendor already existed or was empty after trim.');
-                }
-            }
-        }
-    });
-
-    // Handle client folder management
-    ipcMain.on('get-client-folders', (event) => {
-        // Ensure renderer always gets the latest list, including when get-client-folders is explicitly called
-        event.sender.send('client-folders', clientFolders);
-    });
-
-    // Handle request to open directory dialog
-    ipcMain.on('show-open-directory-dialog', async (event) => {
-        const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow(), {
-            properties: ['openDirectory']
-        });
-
-        if (!result.canceled && result.filePaths.length > 0) {
-            const selectedPath = result.filePaths[0];
-            const folderName = path.basename(selectedPath);
-
-            // Check if this folder (by path) already exists
-            const existingFolder = clientFolders.find(folder => folder.path === selectedPath);
-            if (!existingFolder) {
-                clientFolders.push({ name: folderName, path: selectedPath });
-                saveSettings(); // Save updated client folder list
-                // Send the updated list to all windows, or specifically to the requesting one
-                BrowserWindow.getAllWindows().forEach(win => {
-                    win.webContents.send('client-folders', clientFolders);
-                });
-            } else {
-                // Optionally, notify the user that the folder is already added
-                console.log('Folder already added:', selectedPath);
-            }
-        }
-    });
-
-    // Handle receipt saving
-    ipcMain.on('save-receipt', (event, data) => {
-        const { clientFolder, clientName, vendorName, date, amount, originalFilePath } = data;
-        console.log('[ipcMain] save-receipt: Received vendorName for potential save:', vendorName);
-
-        // Format the filename (vendorName here is the one intended for the filename)
-        const formattedDate = date.replace(/\//g, '-');
-        const newFileName = `${clientName} ${vendorName} ${formattedDate} ${amount}${path.extname(originalFilePath)}`;
-
-        const destinationPath = path.join(clientFolder, newFileName);
-
-        try {
-            fs.copyFileSync(originalFilePath, destinationPath);
-
-            // If save is successful, add vendorName to knownVendorsSet
-            if (vendorName && typeof vendorName === 'string') {
-                const trimmedVendorForSet = vendorName.trim();
-                if (trimmedVendorForSet) {
-                    const previousSize = knownVendorsSet.size;
-                    knownVendorsSet.add(trimmedVendorForSet);
-                    while (knownVendorsSet.size > CONFIG.maxKnownVendors) {
-                        const oldestVendor = knownVendorsSet.values().next().value;
-                        knownVendorsSet.delete(oldestVendor);
-                    }
-                    if (knownVendorsSet.size > previousSize) {
-                        console.log('[ipcMain] save-receipt: New vendor added to set:', trimmedVendorForSet, 'New set:', Array.from(knownVendorsSet));
-                        saveSettings(); // Save settings because knownVendorsSet changed
-                    } else {
-                        console.log('[ipcMain] save-receipt: Vendor already in set or empty:', trimmedVendorForSet);
-                    }
-                }
-            }
-            event.reply('save-receipt-result', { success: true, path: destinationPath, vendorNameUsedInSave: vendorName }); // Send back the vendorName
-        } catch (error) {
-            console.error('Error saving receipt:', error);
-            event.reply('save-receipt-result', { success: false, error: error.message });
-        }
-    });
-
-    // Handle toggle auto-prompt setting
-    ipcMain.on('toggle-auto-prompt', (event, enabled) => {
-        CONFIG.autoPromptEnabled = enabled;
-        saveSettings();
-        
-        BrowserWindow.getAllWindows().forEach(win => {
-            if (win && !win.isDestroyed() && win.webContents) {
-                win.webContents.send('auto-prompt-status', CONFIG.autoPromptEnabled);
-            }
-        });
-        // After state changes and UI is notified, update the tray menu to reflect the new state
-        if (tray) { // Ensure tray object exists
-            createTrayMenu(); // Call a new function that only rebuilds and sets the menu
-        }
-    });
-
-    // Handle get auto-prompt status
-    ipcMain.on('get-auto-prompt-status', (event) => {
-        event.reply('auto-prompt-status', CONFIG.autoPromptEnabled);
-    });
-
-    // Handle toggle scan monitoring setting from UI
-    ipcMain.on('toggle-scan-monitoring', (event, enabled) => {
-        CONFIG.monitoringEnabled = enabled;
-        saveSettings();
-
-        if (CONFIG.monitoringEnabled) {
-            startFileWatcher();
-        } else {
-            stopFileWatcher();
-        }
-
-        // Broadcast status change to all windows
-        BrowserWindow.getAllWindows().forEach(win => {
-            if (win && !win.isDestroyed() && win.webContents) {
-                win.webContents.send('monitoring-status-changed', CONFIG.monitoringEnabled);
-            }
-        });
-
-        // Update tray menu
-        if (tray) {
-            createTrayMenu();
-        }
-    });
-
-    // Handle get monitoring status from UI
-    ipcMain.on('get-monitoring-status', (event) => {
-        // We can reuse 'monitoring-status-changed' or use a dedicated reply like 'initial-monitoring-status'
-        // For simplicity, reusing the existing channel that the UI listens to for updates.
-        event.sender.send('monitoring-status-changed', CONFIG.monitoringEnabled);
-    });
-
-    // IPC Handler to remove a client folder
-    ipcMain.on('remove-client-folder', (event, folderPathToRemove) => {
-        if (folderPathToRemove && typeof folderPathToRemove === 'string') {
-            const initialLength = clientFolders.length;
-            clientFolders = clientFolders.filter(folder => folder.path !== folderPathToRemove);
-
-            if (clientFolders.length < initialLength) { // If a folder was actually removed
-                saveSettings();
-                // Send the updated list to all windows
-                BrowserWindow.getAllWindows().forEach(win => {
-                    if (win && !win.isDestroyed() && win.webContents) {
-                        win.webContents.send('client-folders', clientFolders);
-                    }
-                });
-                console.log('Removed client folder:', folderPathToRemove, 'New list:', clientFolders);
-            } else {
-                console.log('Client folder not found for removal:', folderPathToRemove);
-            }
-        } else {
-            console.error('Invalid folderPathToRemove received:', folderPathToRemove);
-        }
-    });
-
-    // IPC Handler to remove a known vendor
-    ipcMain.on('remove-known-vendor', (event, vendorNameToRemove) => {
-        if (vendorNameToRemove && typeof vendorNameToRemove === 'string') {
-            if (knownVendorsSet.has(vendorNameToRemove)) {
-                knownVendorsSet.delete(vendorNameToRemove);
-                saveSettings();
-                // Broadcast the updated list to all windows
-                BrowserWindow.getAllWindows().forEach(win => {
-                    if (win && !win.isDestroyed() && win.webContents) {
-                        win.webContents.send('known-vendors-list', Array.from(knownVendorsSet));
-                    }
-                });
-                console.log('Removed known vendor:', vendorNameToRemove, 'New set:', knownVendorsSet);
-            } else {
-                console.log('Known vendor not found for removal:', vendorNameToRemove);
-            }
-        } else {
-            console.error('Invalid vendorNameToRemove received:', vendorNameToRemove);
-        }
     });
 }
 
